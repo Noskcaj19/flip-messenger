@@ -42,10 +42,12 @@ final class Snapshot {
 
 final class SyncResult {
     final String cursor;
+    final List<Channel> channels;
     final List<Message> messages;
 
-    SyncResult(String cursor, List<Message> messages) {
+    SyncResult(String cursor, List<Channel> channels, List<Message> messages) {
         this.cursor = cursor;
+        this.channels = channels;
         this.messages = messages;
     }
 }

@@ -5,24 +5,14 @@
   "tls_key": "certs/server.key",
   "data_file": "data/state.json",
   "api_token": "replace-this-with-a-long-random-token",
-  "channels": [
-    {
-      "id": "jack-discord",
-      "qualified_name": "jack:discord",
-      "display_name": "Jack (Discord)",
-      "echo_prefix": "Discord echo"
-    },
-    {
-      "id": "jack-sms",
-      "qualified_name": "jack:sms",
-      "display_name": "Jack (SMS)",
-      "echo_prefix": "SMS echo"
-    },
-    {
-      "id": "assistant-agent",
-      "qualified_name": "assistant:agent",
-      "display_name": "Loopback Agent",
-      "echo_prefix": "Agent"
-    }
-  ]
+  "debug": false,
+  "google_messages": {
+    "enabled": true,
+    "session_file": "data/gmessages-session.json",
+    "history": 50,
+    "whitelist": [
+      "+15551234567"
+    ]
+  },
+  "channels": []
 }

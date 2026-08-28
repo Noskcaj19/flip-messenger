@@ -13,6 +13,9 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.TableLayout;
+import android.widget.TableRow;
 import android.widget.TextView;
 
 import java.util.ArrayList;
@@ -23,6 +26,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 public final class MainActivity extends Activity {
@@ -34,8 +38,12 @@ public final class MainActivity extends Activity {
     private final ScheduledExecutorService network = Executors.newSingleThreadScheduledExecutor();
 
     private ApiClient api;
+    private ScheduledFuture<?> polling;
     private TextView heading;
     private TextView content;
+    private ScrollView channelListScroll;
+    private TableLayout channelTable;
+    private View selectedChannelRow;
     private TextView status;
     private EditText composer;
     private int selectedChannel;
@@ -48,10 +56,26 @@ public final class MainActivity extends Activity {
         setContentView(createContentView());
         try {
             api = new ApiClient(BuildConfig.SERVER_URL, BuildConfig.API_TOKEN);
-            network.scheduleWithFixedDelay(this::poll, 0, 2, TimeUnit.SECONDS);
         } catch (IllegalArgumentException error) {
             showStatus(error.getMessage());
         }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (api != null && (polling == null || polling.isDone())) {
+            polling = network.scheduleWithFixedDelay(this::poll, 0, 2, TimeUnit.SECONDS);
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        if (polling != null) {
+            polling.cancel(false);
+            polling = null;
+        }
+        super.onPause();
     }
 
     @Override
@@ -124,6 +148,18 @@ public final class MainActivity extends Activity {
         heading.setTypeface(Typeface.DEFAULT_BOLD);
         root.addView(heading);
 
+        channelTable = new TableLayout(this);
+        channelTable.setStretchAllColumns(true);
+
+        channelListScroll = new ScrollView(this);
+        channelListScroll.setFillViewport(true);
+        channelListScroll.setVisibility(View.GONE);
+        channelListScroll.addView(channelTable, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.addView(channelListScroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
         content = text("Connecting to server…", 15, Color.WHITE);
         content.setGravity(Gravity.TOP | Gravity.START);
         content.setTypeface(Typeface.MONOSPACE);
@@ -180,10 +216,29 @@ public final class MainActivity extends Activity {
     }
 
     private void applySync(SyncResult result) {
+        if (result.channels != null) {
+            String openChannelId = openChannel == null ? null : openChannel.id;
+            channels.clear();
+            channels.addAll(result.channels);
+            openChannel = findChannel(openChannelId);
+            selectedChannel = Math.min(selectedChannel, Math.max(0, channels.size() - 1));
+        }
         addMessages(result.messages);
         cursor = result.cursor;
         render();
         showStatus("Online • cursor " + cursor);
+    }
+
+    private Channel findChannel(String id) {
+        if (id == null) {
+            return null;
+        }
+        for (Channel channel : channels) {
+            if (id.equals(channel.id)) {
+                return channel;
+            }
+        }
+        return null;
     }
 
     private void addMessages(List<Message> additions) {
@@ -205,22 +260,87 @@ public final class MainActivity extends Activity {
     private void renderChannels() {
         heading.setText("CHANNELS");
         composer.setVisibility(View.GONE);
-        StringBuilder list = new StringBuilder();
+        content.setVisibility(View.GONE);
+        channelListScroll.setVisibility(View.VISIBLE);
+        channelTable.removeAllViews();
+        selectedChannelRow = null;
+
+        if (channels.isEmpty()) {
+            TextView empty = createChannelCell("No channels configured", false);
+            channelTable.addView(empty, new TableLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT));
+            return;
+        }
+
         for (int i = 0; i < channels.size(); i++) {
             Channel channel = channels.get(i);
-            list.append(i == selectedChannel ? "▶ " : "  ")
-                    .append(channel.displayName)
-                    .append('\n')
-                    .append("  ")
-                    .append(channel.qualifiedName)
-                    .append('\n');
+            if (i > 0) {
+                View separator = new View(this);
+                separator.setBackgroundColor(Color.rgb(55, 65, 81));
+                channelTable.addView(separator, new TableLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+            }
+
+            boolean selected = i == selectedChannel;
+            TableRow row = new TableRow(this);
+            row.setBackgroundColor(selected ? Color.rgb(31, 41, 55) : Color.TRANSPARENT);
+            row.addView(createChannelCell(
+                    (selected ? "▶ " : "  ") + channel.displayName,
+                    selected),
+                    new TableRow.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            channelTable.addView(row, new TableLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT));
+            if (selected) {
+                selectedChannelRow = row;
+            }
         }
-        content.setText(list.length() == 0 ? "No channels configured" : list.toString());
+        channelListScroll.post(() -> {
+            if (openChannel == null) {
+                scrollSelectedChannelIntoView();
+            }
+        });
+    }
+
+    private TextView createChannelCell(String value, boolean selected) {
+        TextView cell = text(value, 15, Color.WHITE);
+        cell.setTypeface(Typeface.MONOSPACE, selected ? Typeface.BOLD : Typeface.NORMAL);
+        cell.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
+        cell.setSingleLine(false);
+        cell.setHorizontallyScrolling(false);
+        cell.setPadding(dp(4), dp(7), dp(4), dp(7));
+        return cell;
+    }
+
+    private void scrollSelectedChannelIntoView() {
+        if (selectedChannelRow == null) {
+            return;
+        }
+
+        int itemTop = selectedChannelRow.getTop();
+        int itemBottom = selectedChannelRow.getBottom();
+        int viewportHeight = channelListScroll.getHeight()
+                - channelListScroll.getPaddingTop()
+                - channelListScroll.getPaddingBottom();
+        int scrollY = channelListScroll.getScrollY();
+        int targetY = scrollY;
+        if (itemTop < scrollY) {
+            targetY = itemTop;
+        } else if (itemBottom > scrollY + viewportHeight) {
+            targetY = itemBottom - viewportHeight;
+        }
+
+        int maxScrollY = Math.max(0, channelTable.getHeight() - viewportHeight);
+        channelListScroll.scrollTo(0, Math.max(0, Math.min(targetY, maxScrollY)));
     }
 
     private void renderConversation() {
         heading.setText(openChannel.displayName);
         composer.setVisibility(View.VISIBLE);
+        channelListScroll.setVisibility(View.GONE);
+        content.setVisibility(View.VISIBLE);
+        content.scrollTo(0, 0);
         List<Message> visible = new ArrayList<>();
         for (Message message : messages) {
             if (openChannel.id.equals(message.channelId)) {

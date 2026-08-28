@@ -29,6 +29,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if err := app.Start(context.Background()); err != nil {
+		log.Fatal(err)
+	}
+	defer app.Close()
 
 	httpServer := &http.Server{
 		Addr:              config.Listen,

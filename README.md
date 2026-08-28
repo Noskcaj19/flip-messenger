@@ -1,25 +1,29 @@
-# Flip Messenger loopback prototype
+# Flip Messenger
 
 This repository contains a minimal Android 11 keypad messaging client and a Go
-loopback server. Channels are configured on the server. Sending text to any
-channel durably stores the message and immediately creates a simulated reply.
+server. The server uses
+[`mautrix/gmessages`](https://github.com/mautrix/gmessages) to link to Google
+Messages for Web and expose SMS and RCS conversations to the phone.
 
 Implemented now:
 
-- server-configured channels such as `jack:discord` and `jack:sms`
+- Google-account cookie and emoji pairing with server-only session storage
+- SMS and RCS conversation discovery, history import, and live incoming text
+- durable outgoing queue with idempotent commands and remote-echo deduplication
+- dynamic channel refresh while the Android client is running
 - HTTPS with bearer-token authentication
-- durable messages and idempotent send commands
 - cursor-based bootstrap and incremental synchronization
 - Android channel list, conversation view, text entry, and two-second polling
 - Android key/scan-code logging for continued TCL button discovery
 
-Images, reactions, receipts, FCM, WebSockets, platform adapters, and WebRTC are
-not implemented yet.
+Attachments are currently shown as text placeholders. Reactions, receipts,
+typing, FCM, WebSockets, and WebRTC are not implemented yet.
 
 ## 1. Configure the server
 
-Requirements: Go 1.18 or newer. HTTPS is the default and requires a certificate
-valid for the hostname or IP used by the phone.
+Requirements: Go 1.27 (the module and its pinned `mautrix/gmessages` revision
+require the modern Go toolchain). HTTPS is the default and requires a
+certificate valid for the hostname or IP used by the phone.
 
 ```sh
 cd server
@@ -29,8 +33,16 @@ cp config.example.json config.json
 Edit `config.json`:
 
 - replace `api_token` with a long random value (`openssl rand -hex 32`)
-- set the desired channel entries
+- leave `google_messages.enabled` set to `true`
+- choose how many recent messages to import per conversation with
+  `google_messages.history` (maximum 500)
+- set `google_messages.whitelist` to the participant phone numbers or Google
+  conversation IDs that may appear in the client; a group is allowed when any
+  non-self participant is listed, an empty list allows none, and omitting the
+  field disables filtering
 - set `tls_cert` and `tls_key` to the certificate files
+- set `debug` to `true` for HTTP, synchronization, outbox, and Google Messages
+  protocol diagnostics; message bodies, cookies, and tokens are not logged
 
 For normal use, prefer a DNS name and publicly trusted certificate. For LAN
 development, `mkcert` can create a certificate for the server hostname/IP. Its
@@ -47,6 +59,73 @@ Start the server from the `server` directory:
 go run ./cmd/loopback -config config.json
 ```
 
+The command name is retained for compatibility, but an enabled Google Messages
+configuration does not create loopback echoes.
+
+## 2. Pair Google Messages
+
+Google has disabled the old QR pairing flow. Manual authentication uses cookies
+from a dedicated private browser session and an emoji confirmation on the
+primary phone:
+
+1. Open this URL in a **private Firefox window** and log into the same Google
+   account used by Google Messages:
+
+   <https://accounts.google.com/AccountChooser?continue=https://messages.google.com/web/config>
+
+   Do not navigate elsewhere in that window. Browsers with Device Bound Session
+   Credentials enabled may not work; Firefox currently does not implement it.
+
+2. Open developer tools and its Network tab, reload the page, select the
+   `/web/config` request, and choose **Copy as cURL (bash)**.
+
+3. Save the copied command to a private temporary file without putting the
+   cookies into shell history:
+
+```sh
+umask 077
+cat > /tmp/gmessages-auth.curl
+# Paste the copied cURL command, then press Ctrl-D.
+```
+
+4. From the repository root, submit it to the server. The response contains the
+   emoji to select in Google Messages. The URL below matches the current local
+   HTTP development setup; use your HTTPS server URL otherwise:
+
+```sh
+token=$(python -c 'import json; print(json.load(open("server/config.json"))["api_token"])')
+server_url=http://127.0.0.1:8080
+curl -sS -X POST \
+  -H "Authorization: Bearer $token" \
+  -H 'Content-Type: text/plain' \
+  --data-binary @/tmp/gmessages-auth.curl \
+  "$server_url/v1/google/pair" | python -m json.tool
+rm -f /tmp/gmessages-auth.curl
+```
+
+5. Open Google Messages on the primary phone and tap the matching emoji when
+   prompted. Pairing completes asynchronously. Check status until `paired` is
+   `true`:
+
+```sh
+curl -sS -H "Authorization: Bearer $token" \
+  "$server_url/v1/google/status" | python -m json.tool
+```
+
+Instead of copied cURL, the pairing endpoint also accepts a JSON object mapping
+cookie names to values. `SID`, `HSID`, `OSID`, `SSID`, `APISID`, and `SAPISID`
+are required; Google may also require `__Secure-1PSIDTS`.
+
+After pairing, the session credentials are stored with mode `0600` at
+`google_messages.session_file`. Keep this file private and backed up. The server
+reconnects and imports configured history on restart. If Google revokes or
+expires the link, clear the local pairing and then pair again:
+
+```sh
+curl -X DELETE -H 'Authorization: Bearer YOUR_TOKEN' \
+  https://YOUR_SERVER:8443/v1/google/session
+```
+
 Check it from another terminal:
 
 ```sh
@@ -59,7 +138,7 @@ State is written atomically to the configured `data_file`. Keep both that file
 and the attachment-free configuration backed up; deleting the state file
 resets all messages and cursors.
 
-## 2. Build and install the Android client
+## 3. Build and install the Android client
 
 The server URL and matching token are compiled into this prototype APK:
 
@@ -102,7 +181,8 @@ adb shell getevent -lt
 
 `GET /v1/bootstrap` returns the configured channels, complete current message
 snapshot, and synchronization cursor. `GET /v1/sync?after=<cursor>` returns up
-to 200 committed `message.created` events after that cursor.
+to 200 committed `message.created` events after that cursor, plus the current
+dynamic channel list.
 
 Text is sent with `POST /v1/messages`:
 
@@ -122,3 +202,19 @@ Text is sent with `POST /v1/messages`:
 
 Retrying the same command ID and body returns the original acknowledgement.
 Reusing a command ID with a different body returns `idempotency_conflict`.
+
+For Google Messages channels, acceptance means the command and outgoing message
+are durably queued by this server. The queue is retried until Google Messages
+accepts it; carrier/RCS delivery can occur later. A remote echo with the same
+client message ID resolves the queue entry without creating a duplicate.
+
+## Google Messages dependency caveats
+
+`mautrix/gmessages` is an unofficial reverse-engineered Messages for Web client.
+Google may change the private protocol, and sending depends on the paired
+Android phone remaining online and responsive. The dependency is pinned to an
+exact commit through `server/go.mod` for reproducible behavior.
+
+`mautrix/gmessages` is licensed AGPL-3.0-or-later. Network deployment or
+distribution may require providing the corresponding source under the AGPL;
+review those obligations before deploying this server to other users.

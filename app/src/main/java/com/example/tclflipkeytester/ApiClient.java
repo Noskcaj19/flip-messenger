@@ -33,18 +33,9 @@ final class ApiClient {
 
     Snapshot bootstrap() throws IOException, JSONException {
         JSONObject response = request("GET", "/v1/bootstrap", null);
-        List<Channel> channels = new ArrayList<>();
-        JSONArray channelValues = response.getJSONArray("channels");
-        for (int i = 0; i < channelValues.length(); i++) {
-            JSONObject value = channelValues.getJSONObject(i);
-            channels.add(new Channel(
-                    value.getString("channel_id"),
-                    value.getString("qualified_name"),
-                    value.getString("display_name")));
-        }
         return new Snapshot(
                 response.getString("cursor"),
-                channels,
+                parseChannels(response.getJSONArray("channels")),
                 parseMessages(response.getJSONArray("messages")));
     }
 
@@ -63,7 +54,10 @@ final class ApiClient {
         if (events.length() == 0) {
             cursor = response.getString("high_watermark");
         }
-        return new SyncResult(cursor, messages);
+        List<Channel> channels = response.has("channels")
+                ? parseChannels(response.getJSONArray("channels"))
+                : null;
+        return new SyncResult(cursor, channels, messages);
     }
 
     void sendMessage(String commandId, String clientMessageId, String channelId, String text)
@@ -117,6 +111,18 @@ final class ApiClient {
             messages.add(parseMessage(values.getJSONObject(i)));
         }
         return messages;
+    }
+
+    private static List<Channel> parseChannels(JSONArray values) throws JSONException {
+        List<Channel> channels = new ArrayList<>();
+        for (int i = 0; i < values.length(); i++) {
+            JSONObject value = values.getJSONObject(i);
+            channels.add(new Channel(
+                    value.getString("channel_id"),
+                    value.getString("qualified_name"),
+                    value.getString("display_name")));
+        }
+        return channels;
     }
 
     private static Message parseMessage(JSONObject value) throws JSONException {

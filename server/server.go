@@ -1,6 +1,7 @@
 package loopback
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -9,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -21,13 +23,22 @@ import (
 const maxRequestBytes = 64 << 10
 
 type Config struct {
-	Listen    string    `json:"listen"`
-	AllowHTTP bool      `json:"allow_http"`
-	TLSCert   string    `json:"tls_cert"`
-	TLSKey    string    `json:"tls_key"`
-	DataFile  string    `json:"data_file"`
-	APIToken  string    `json:"api_token"`
-	Channels  []Channel `json:"channels"`
+	Listen         string               `json:"listen"`
+	AllowHTTP      bool                 `json:"allow_http"`
+	TLSCert        string               `json:"tls_cert"`
+	TLSKey         string               `json:"tls_key"`
+	DataFile       string               `json:"data_file"`
+	APIToken       string               `json:"api_token"`
+	Debug          bool                 `json:"debug"`
+	Channels       []Channel            `json:"channels"`
+	GoogleMessages GoogleMessagesConfig `json:"google_messages"`
+}
+
+type GoogleMessagesConfig struct {
+	Enabled     bool     `json:"enabled"`
+	SessionFile string   `json:"session_file"`
+	History     int      `json:"history"`
+	Whitelist   []string `json:"whitelist"`
 }
 
 type Channel struct {
@@ -80,19 +91,31 @@ type commandRecord struct {
 	Cursor    string `json:"cursor"`
 }
 
+type outboxRecord struct {
+	ChannelID       string `json:"channel_id"`
+	ClientMessageID string `json:"client_message_id"`
+	Text            string `json:"text"`
+	Sequence        uint64 `json:"sequence"`
+}
+
 type state struct {
-	NextCursor uint64                   `json:"next_cursor"`
-	Messages   []Message                `json:"messages"`
-	Events     []Event                  `json:"events"`
-	Commands   map[string]commandRecord `json:"commands"`
+	NextCursor          uint64                        `json:"next_cursor"`
+	Messages            []Message                     `json:"messages"`
+	Events              []Event                       `json:"events"`
+	Commands            map[string]commandRecord      `json:"commands"`
+	Outbox              map[string]outboxRecord       `json:"outbox,omitempty"`
+	GoogleConversations map[string]googleConversation `json:"google_conversations,omitempty"`
+	GoogleMessages      map[string]string             `json:"google_messages,omitempty"`
 }
 
 type Server struct {
 	mu       sync.Mutex
+	sendMu   sync.Mutex
 	config   Config
 	channels map[string]Channel
 	state    state
 	now      func() time.Time
+	google   *GoogleMessages
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -113,8 +136,19 @@ func LoadConfig(path string) (Config, error) {
 	if len(config.APIToken) < 16 {
 		return Config{}, errors.New("api_token must be at least 16 characters")
 	}
-	if len(config.Channels) == 0 {
-		return Config{}, errors.New("at least one channel is required")
+	if len(config.Channels) == 0 && !config.GoogleMessages.Enabled {
+		return Config{}, errors.New("at least one channel or google_messages must be enabled")
+	}
+	if config.GoogleMessages.Enabled {
+		if config.GoogleMessages.SessionFile == "" {
+			config.GoogleMessages.SessionFile = "data/gmessages-session.json"
+		}
+		if config.GoogleMessages.History == 0 {
+			config.GoogleMessages.History = 50
+		}
+		if config.GoogleMessages.History < 0 || config.GoogleMessages.History > 500 {
+			return Config{}, errors.New("google_messages.history must be between 0 and 500")
+		}
 	}
 	seen := make(map[string]bool)
 	for _, channel := range config.Channels {
@@ -135,9 +169,12 @@ func New(config Config) (*Server, error) {
 		channels: make(map[string]Channel),
 		now:      time.Now,
 		state: state{
-			Messages: make([]Message, 0),
-			Events:   make([]Event, 0),
-			Commands: make(map[string]commandRecord),
+			Messages:            make([]Message, 0),
+			Events:              make([]Event, 0),
+			Commands:            make(map[string]commandRecord),
+			Outbox:              make(map[string]outboxRecord),
+			GoogleConversations: make(map[string]googleConversation),
+			GoogleMessages:      make(map[string]string),
 		},
 	}
 	for _, channel := range config.Channels {
@@ -146,7 +183,32 @@ func New(config Config) (*Server, error) {
 	if err := server.loadState(); err != nil {
 		return nil, err
 	}
+	if config.GoogleMessages.Enabled {
+		google, err := NewGoogleMessages(config.GoogleMessages, server)
+		if err != nil {
+			return nil, err
+		}
+		server.google = google
+		if err := server.applyGoogleWhitelist(); err != nil {
+			return nil, err
+		}
+	}
+	server.debugf("loaded state: static_channels=%d google_channels=%d messages=%d events=%d outbox=%d",
+		len(server.channels), len(server.state.GoogleConversations), len(server.state.Messages), len(server.state.Events), len(server.state.Outbox))
 	return server, nil
+}
+
+func (s *Server) Start(ctx context.Context) error {
+	if s.google == nil {
+		return nil
+	}
+	return s.google.Start(ctx)
+}
+
+func (s *Server) Close() {
+	if s.google != nil {
+		s.google.Close()
+	}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -156,7 +218,52 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/sync", s.auth(s.syncEvents))
 	mux.HandleFunc("/v1/messages", s.auth(s.messages))
 	mux.HandleFunc("/v1/channels/", s.auth(s.channelMessages))
-	return requestHeaders(mux)
+	mux.HandleFunc("/v1/google/status", s.auth(s.googleStatus))
+	mux.HandleFunc("/v1/google/pair", s.auth(s.googlePair))
+	mux.HandleFunc("/v1/google/session", s.auth(s.googleSession))
+	return requestHeaders(s.requestLogging(mux))
+}
+
+type responseStatusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *responseStatusWriter) WriteHeader(status int) {
+	if w.status != 0 {
+		return
+	}
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *responseStatusWriter) Write(contents []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(contents)
+}
+
+func (s *Server) requestLogging(next http.Handler) http.Handler {
+	if !s.config.Debug {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
+		tracked := &responseStatusWriter{ResponseWriter: w}
+		next.ServeHTTP(tracked, r)
+		status := tracked.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		s.debugf("http method=%s path=%s status=%d duration=%s", r.Method, r.URL.Path, status, time.Since(started).Round(time.Millisecond))
+	})
+}
+
+func (s *Server) debugf(format string, values ...any) {
+	if s.config.Debug {
+		log.Printf("DEBUG: "+format, values...)
+	}
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
@@ -193,7 +300,21 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		Cursor   string    `json:"cursor"`
 		Channels []Channel `json:"channels"`
 		Messages []Message `json:"messages"`
-	}{1, strconv.FormatUint(s.state.NextCursor, 10), s.config.Channels, s.state.Messages})
+	}{1, strconv.FormatUint(s.state.NextCursor, 10), s.allChannels(), s.visibleMessages()})
+}
+
+func (s *Server) allChannels() []Channel {
+	channels := make([]Channel, 0, len(s.config.Channels)+len(s.state.GoogleConversations))
+	channels = append(channels, s.config.Channels...)
+	google := make([]Channel, 0, len(s.state.GoogleConversations))
+	for _, conversation := range s.state.GoogleConversations {
+		if !conversation.Allowed {
+			continue
+		}
+		google = append(google, conversation.Channel())
+	}
+	sortChannels(google)
+	return append(channels, google...)
 }
 
 func (s *Server) syncEvents(w http.ResponseWriter, r *http.Request) {
@@ -211,7 +332,7 @@ func (s *Server) syncEvents(w http.ResponseWriter, r *http.Request) {
 	events := make([]Event, 0)
 	for _, event := range s.state.Events {
 		cursor, _ := strconv.ParseUint(event.Cursor, 10, 64)
-		if cursor > after {
+		if cursor > after && s.channelVisible(event.Body.ChannelID) {
 			events = append(events, event)
 		}
 		if len(events) == 200 {
@@ -219,10 +340,12 @@ func (s *Server) syncEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, struct {
-		Version       int     `json:"v"`
-		Events        []Event `json:"events"`
-		HighWatermark string  `json:"high_watermark"`
-	}{1, events, strconv.FormatUint(s.state.NextCursor, 10)})
+		Version       int       `json:"v"`
+		Events        []Event   `json:"events"`
+		HighWatermark string    `json:"high_watermark"`
+		Channels      []Channel `json:"channels"`
+	}{1, events, strconv.FormatUint(s.state.NextCursor, 10), s.allChannels()})
+	s.debugf("sync after=%d returned_events=%d high_watermark=%d", after, len(events), s.state.NextCursor)
 }
 
 type sendCommand struct {
@@ -262,23 +385,35 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "validation_failed", "text must contain 1 to 2000 characters")
 		return
 	}
-	channel, found := s.channels[command.Body.ChannelID]
+	channel, found := s.channel(command.Body.ChannelID)
 	if !found {
 		writeError(w, http.StatusNotFound, "channel_not_found", "unknown channel")
 		return
 	}
 
 	hash := commandHash(command.Body.ChannelID, command.Body.ClientMessageID, text)
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if previous, exists := s.state.Commands[command.CommandID]; exists {
 		if previous.BodyHash != hash {
+			s.mu.Unlock()
 			writeError(w, http.StatusConflict, "idempotency_conflict", "command_id was already used with a different body")
 			return
 		}
+		s.mu.Unlock()
 		writeAck(w, command.CommandID, previous.MessageID, previous.Cursor, true)
 		return
 	}
+	_, isGoogle := s.state.GoogleConversations[channel.ID]
+	if isGoogle {
+		if s.google == nil {
+			s.mu.Unlock()
+			writeError(w, http.StatusServiceUnavailable, "backend_unavailable", "Google Messages backend is disabled")
+			return
+		}
+	}
+	defer s.mu.Unlock()
 
 	message := Message{
 		ID:              newID("msg"),
@@ -292,19 +427,29 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	previousEventCount := len(s.state.Events)
 	previousCursor := s.state.NextCursor
 	s.appendMessage(message)
+	if isGoogle {
+		s.state.Outbox[command.CommandID] = outboxRecord{
+			ChannelID:       channel.ID,
+			ClientMessageID: command.Body.ClientMessageID,
+			Text:            text,
+			Sequence:        s.state.NextCursor,
+		}
+	}
 
-	prefix := channel.EchoPrefix
-	if prefix == "" {
-		prefix = channel.DisplayName
+	if !isGoogle {
+		prefix := channel.EchoPrefix
+		if prefix == "" {
+			prefix = channel.DisplayName
+		}
+		echo := Message{
+			ID:        newID("msg"),
+			ChannelID: channel.ID,
+			Author:    "channel",
+			Text:      prefix + ": " + text,
+			CreatedAt: s.now().UTC().Format(time.RFC3339Nano),
+		}
+		s.appendMessage(echo)
 	}
-	echo := Message{
-		ID:        newID("msg"),
-		ChannelID: channel.ID,
-		Author:    "channel",
-		Text:      prefix + ": " + text,
-		CreatedAt: s.now().UTC().Format(time.RFC3339Nano),
-	}
-	s.appendMessage(echo)
 	committedCursor := strconv.FormatUint(s.state.NextCursor, 10)
 	s.state.Commands[command.CommandID] = commandRecord{hash, message.ID, committedCursor}
 	if err := s.saveState(); err != nil {
@@ -312,10 +457,15 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		s.state.Events = s.state.Events[:previousEventCount]
 		s.state.NextCursor = previousCursor
 		delete(s.state.Commands, command.CommandID)
+		delete(s.state.Outbox, command.CommandID)
 		writeError(w, http.StatusInternalServerError, "storage_failed", "message was not stored")
 		return
 	}
 	writeAck(w, command.CommandID, message.ID, committedCursor, false)
+	s.debugf("accepted message command channel=%s message=%s google=%t cursor=%s", channel.ID, message.ID, isGoogle, committedCursor)
+	if isGoogle {
+		s.google.WakeOutbox()
+	}
 }
 
 func (s *Server) appendMessage(message Message) {
@@ -333,6 +483,16 @@ func (s *Server) appendMessage(message Message) {
 	})
 }
 
+func (s *Server) channel(id string) (Channel, bool) {
+	if channel, found := s.channels[id]; found {
+		return channel, true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	conversation, found := s.state.GoogleConversations[id]
+	return conversation.Channel(), found && conversation.Allowed
+}
+
 func (s *Server) channelMessages(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
@@ -343,7 +503,12 @@ func (s *Server) channelMessages(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if _, found := s.channels[parts[0]]; !found {
+	_, staticFound := s.channels[parts[0]]
+	s.mu.Lock()
+	conversation, googleFound := s.state.GoogleConversations[parts[0]]
+	googleFound = googleFound && conversation.Allowed
+	s.mu.Unlock()
+	if !staticFound && !googleFound {
 		writeError(w, http.StatusNotFound, "channel_not_found", "unknown channel")
 		return
 	}
@@ -356,6 +521,24 @@ func (s *Server) channelMessages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"v": 1, "messages": messages})
+}
+
+func (s *Server) visibleMessages() []Message {
+	messages := make([]Message, 0, len(s.state.Messages))
+	for _, message := range s.state.Messages {
+		if s.channelVisible(message.ChannelID) {
+			messages = append(messages, message)
+		}
+	}
+	return messages
+}
+
+func (s *Server) channelVisible(channelID string) bool {
+	conversation, google := s.state.GoogleConversations[channelID]
+	if google {
+		return conversation.Allowed
+	}
+	return !strings.HasPrefix(channelID, "gmessages_")
 }
 
 func (s *Server) loadState() error {
@@ -372,11 +555,20 @@ func (s *Server) loadState() error {
 	if s.state.Commands == nil {
 		s.state.Commands = make(map[string]commandRecord)
 	}
+	if s.state.Outbox == nil {
+		s.state.Outbox = make(map[string]outboxRecord)
+	}
 	if s.state.Messages == nil {
 		s.state.Messages = make([]Message, 0)
 	}
 	if s.state.Events == nil {
 		s.state.Events = make([]Event, 0)
+	}
+	if s.state.GoogleConversations == nil {
+		s.state.GoogleConversations = make(map[string]googleConversation)
+	}
+	if s.state.GoogleMessages == nil {
+		s.state.GoogleMessages = make(map[string]string)
 	}
 	return nil
 }
