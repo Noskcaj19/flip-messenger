@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "TclFlipKeyTester"
+rootProject.name = "FlipMessenger"
 include(":app")
