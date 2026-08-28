@@ -21,9 +21,9 @@ final class ApiClient {
 
     ApiClient(String baseUrl, String apiToken) {
         boolean secure = baseUrl.startsWith("https://");
-        boolean debugHTTP = BuildConfig.DEBUG && baseUrl.startsWith("http://");
-        if (!secure && !debugHTTP) {
-            throw new IllegalArgumentException("Server URL must use HTTPS outside debug builds");
+        boolean cleartext = baseUrl.startsWith("http://");
+        if (!secure && !cleartext) {
+            throw new IllegalArgumentException("Server URL must use HTTP or HTTPS");
         }
         this.baseUrl = baseUrl.endsWith("/")
                 ? baseUrl.substring(0, baseUrl.length() - 1)

@@ -52,8 +52,9 @@ root CA must also be installed as a user CA on the TCL. Debug builds trust user
 CAs; release builds trust only system CAs.
 
 For temporary trusted-LAN development without TLS, set `allow_http` to `true`,
-change `listen` to `:8080`, and use an `http://` client URL. Only debug APKs
-permit cleartext HTTP; release builds still require HTTPS.
+change `listen` to `:8080`, and use an `http://` client URL. Both debug and
+release APKs permit cleartext HTTP, so use it only on a trusted network: the
+bearer token and all message data are sent without transport encryption.
 
 Start the server from the `server` directory:
 
