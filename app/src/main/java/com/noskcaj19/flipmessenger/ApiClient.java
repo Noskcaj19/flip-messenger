@@ -40,7 +40,16 @@ final class ApiClient {
     }
 
     SyncResult sync(String after) throws IOException, JSONException {
-        JSONObject response = request("GET", "/v1/sync?after=" + after, null);
+        return sync(after, 0);
+    }
+
+    SyncResult sync(String after, int waitSeconds) throws IOException, JSONException {
+        String wait = waitSeconds > 0 ? "&wait=" + waitSeconds + "s" : "";
+        JSONObject response = request(
+                "GET",
+                "/v1/sync?after=" + after + wait,
+                null,
+                waitSeconds > 0 ? (waitSeconds + 10) * 1_000 : 8_000);
         JSONArray events = response.getJSONArray("events");
         List<Message> messages = new ArrayList<>();
         String cursor = after;
@@ -77,10 +86,15 @@ final class ApiClient {
 
     private JSONObject request(String method, String path, JSONObject body)
             throws IOException, JSONException {
+        return request(method, path, body, 8_000);
+    }
+
+    private JSONObject request(String method, String path, JSONObject body, int readTimeoutMillis)
+            throws IOException, JSONException {
         HttpURLConnection connection = (HttpURLConnection) new URL(baseUrl + path).openConnection();
         connection.setRequestMethod(method);
         connection.setConnectTimeout(8_000);
-        connection.setReadTimeout(8_000);
+        connection.setReadTimeout(readTimeoutMillis);
         connection.setRequestProperty("Authorization", "Bearer " + apiToken);
         connection.setRequestProperty("Accept", "application/json");
         if (body != null) {

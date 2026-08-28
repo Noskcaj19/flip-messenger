@@ -20,7 +20,10 @@ import (
 	"time"
 )
 
-const maxRequestBytes = 64 << 10
+const (
+	maxRequestBytes = 64 << 10
+	maxSyncWait     = 25 * time.Second
+)
 
 type Config struct {
 	Listen         string               `json:"listen"`
@@ -116,6 +119,7 @@ type Server struct {
 	state    state
 	now      func() time.Time
 	google   *GoogleMessages
+	syncWake chan struct{}
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -168,6 +172,7 @@ func New(config Config) (*Server, error) {
 		config:   config,
 		channels: make(map[string]Channel),
 		now:      time.Now,
+		syncWake: make(chan struct{}),
 		state: state{
 			Messages:            make([]Message, 0),
 			Events:              make([]Event, 0),
@@ -327,8 +332,54 @@ func (s *Server) syncEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_cursor", err.Error())
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	wait, err := parseSyncWait(r.URL.Query().Get("wait"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_wait", err.Error())
+		return
+	}
+
+	var timer *time.Timer
+	var timeout <-chan time.Time
+	if wait > 0 {
+		timer = time.NewTimer(wait)
+		defer timer.Stop()
+		timeout = timer.C
+	}
+	for {
+		s.mu.Lock()
+		response := s.syncResponseLocked(after)
+		if wait == 0 || len(response.Events) > 0 || s.state.NextCursor > after {
+			s.mu.Unlock()
+			writeJSON(w, http.StatusOK, response)
+			s.debugf("sync after=%d wait=%s returned_events=%d high_watermark=%s", after, wait, len(response.Events), response.HighWatermark)
+			return
+		}
+		wake := s.syncWake
+		s.mu.Unlock()
+
+		select {
+		case <-r.Context().Done():
+			return
+		case <-timeout:
+			s.mu.Lock()
+			response = s.syncResponseLocked(after)
+			s.mu.Unlock()
+			writeJSON(w, http.StatusOK, response)
+			s.debugf("sync after=%d wait=%s timed_out high_watermark=%s", after, wait, response.HighWatermark)
+			return
+		case <-wake:
+		}
+	}
+}
+
+type syncResponse struct {
+	Version       int       `json:"v"`
+	Events        []Event   `json:"events"`
+	HighWatermark string    `json:"high_watermark"`
+	Channels      []Channel `json:"channels"`
+}
+
+func (s *Server) syncResponseLocked(after uint64) syncResponse {
 	events := make([]Event, 0)
 	for _, event := range s.state.Events {
 		cursor, _ := strconv.ParseUint(event.Cursor, 10, 64)
@@ -339,13 +390,7 @@ func (s *Server) syncEvents(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	writeJSON(w, http.StatusOK, struct {
-		Version       int       `json:"v"`
-		Events        []Event   `json:"events"`
-		HighWatermark string    `json:"high_watermark"`
-		Channels      []Channel `json:"channels"`
-	}{1, events, strconv.FormatUint(s.state.NextCursor, 10), s.allChannels()})
-	s.debugf("sync after=%d returned_events=%d high_watermark=%d", after, len(events), s.state.NextCursor)
+	return syncResponse{1, events, strconv.FormatUint(s.state.NextCursor, 10), s.allChannels()}
 }
 
 type sendCommand struct {
@@ -461,6 +506,7 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "storage_failed", "message was not stored")
 		return
 	}
+	s.notifySyncWaitersLocked()
 	writeAck(w, command.CommandID, message.ID, committedCursor, false)
 	s.debugf("accepted message command channel=%s message=%s google=%t cursor=%s", channel.ID, message.ID, isGoogle, committedCursor)
 	if isGoogle {
@@ -481,6 +527,11 @@ func (s *Server) appendMessage(message Message) {
 		OccurredAt: message.CreatedAt,
 		Body:       message,
 	})
+}
+
+func (s *Server) notifySyncWaitersLocked() {
+	close(s.syncWake)
+	s.syncWake = make(chan struct{})
 }
 
 func (s *Server) channel(id string) (Channel, bool) {
@@ -610,6 +661,17 @@ func parseCursor(value string) (uint64, error) {
 		return 0, errors.New("cursor must be a non-negative integer")
 	}
 	return cursor, nil
+}
+
+func parseSyncWait(value string) (time.Duration, error) {
+	if value == "" {
+		return 0, nil
+	}
+	wait, err := time.ParseDuration(value)
+	if err != nil || wait <= 0 || wait > maxSyncWait {
+		return 0, fmt.Errorf("wait must be a duration greater than zero and at most %s", maxSyncWait)
+	}
+	return wait, nil
 }
 
 func writeAck(w http.ResponseWriter, commandID, messageID, cursor string, duplicate bool) {

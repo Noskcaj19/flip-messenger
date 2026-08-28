@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
 )
@@ -97,6 +98,46 @@ func TestBootstrapAndCursorSync(t *testing.T) {
 	}
 	if len(response.Events) != 1 || response.Events[0].Cursor != "2" {
 		t.Fatalf("events = %#v, want only cursor 2", response.Events)
+	}
+}
+
+func TestLongPollReturnsWhenMessageIsCommitted(t *testing.T) {
+	_, handler := newTestServer(t)
+	result := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		result <- request(t, handler, http.MethodGet, "/v1/sync?after=0&wait=2s", nil)
+	}()
+
+	body := []byte(`{"v":1,"kind":"command","type":"message.send","command_id":"cmd-long-poll","body":{"client_message_id":"client-long-poll","channel_id":"jack-discord","text":"wake up"}}`)
+	request(t, handler, http.MethodPost, "/v1/messages", body)
+
+	select {
+	case response := <-result:
+		if response.Code != http.StatusOK {
+			t.Fatalf("long poll status = %d: %s", response.Code, response.Body.String())
+		}
+		var sync syncResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &sync); err != nil {
+			t.Fatal(err)
+		}
+		if len(sync.Events) != 2 || sync.HighWatermark != "2" {
+			t.Fatalf("long poll response = %#v, want two events through cursor 2", sync)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("long poll did not return after a message commit")
+	}
+}
+
+func TestLongPollTimesOutAndValidatesWait(t *testing.T) {
+	_, handler := newTestServer(t)
+	started := time.Now()
+	response := request(t, handler, http.MethodGet, "/v1/sync?after=0&wait=20ms", nil)
+	if response.Code != http.StatusOK || time.Since(started) < 10*time.Millisecond {
+		t.Fatalf("long poll status=%d duration=%s body=%s", response.Code, time.Since(started), response.Body.String())
+	}
+	response = request(t, handler, http.MethodGet, "/v1/sync?after=0&wait=26s", nil)
+	if response.Code != http.StatusBadRequest || !bytes.Contains(response.Body.Bytes(), []byte(`"invalid_wait"`)) {
+		t.Fatalf("invalid wait response status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

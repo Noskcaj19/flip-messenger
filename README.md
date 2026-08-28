@@ -13,11 +13,13 @@ Implemented now:
 - dynamic channel refresh while the Android client is running
 - HTTPS with bearer-token authentication
 - cursor-based bootstrap and incremental synchronization
-- Android channel list, conversation view, text entry, and two-second polling
+- Android channel list, conversation view, text entry, and background long-polling
+- local incoming-message notifications without Google Play Services
 - Android key/scan-code logging for continued TCL button discovery
 
 Attachments are currently shown as text placeholders. Reactions, receipts,
-typing, FCM, WebSockets, and WebRTC are not implemented yet.
+typing, WebSockets, and WebRTC are not implemented yet. FCM is intentionally not
+used because the target TCL firmware does not include Google Play Services.
 
 ## 1. Configure the server
 
@@ -154,6 +156,20 @@ adb shell am start -n com.noskcaj19.flipmessenger/.MainActivity
 If these Gradle properties are omitted, the app intentionally points at the
 invalid hostname `flip-server.invalid`.
 
+The app runs a foreground service with a permanent “Listening for messages”
+notification. It keeps an authenticated long poll open to the server and posts
+a normal local notification for each incoming message while the activity is in
+the background. To prevent Doze from suspending that connection on the TCL, add
+the app to the device-idle allowlist once after installation:
+
+```sh
+adb shell dumpsys deviceidle whitelist +com.noskcaj19.flipmessenger
+```
+
+The service restarts after process termination and device reboot. Android does
+not restart it after the user explicitly force-stops the app; launch Flip
+Messenger once to start it again.
+
 ## Phone controls
 
 - D-pad up/down: select a channel
@@ -181,7 +197,9 @@ adb shell getevent -lt
 `GET /v1/bootstrap` returns the configured channels, complete current message
 snapshot, and synchronization cursor. `GET /v1/sync?after=<cursor>` returns up
 to 200 committed `message.created` events after that cursor, plus the current
-dynamic channel list.
+dynamic channel list. Supplying `wait=25s` holds an otherwise empty sync request
+until an event is committed or the wait expires; waits longer than 25 seconds
+are rejected.
 
 Text is sent with `POST /v1/messages`:
 

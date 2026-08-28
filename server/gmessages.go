@@ -818,6 +818,7 @@ func (s *Server) importGoogleMessage(remote *gmproto.Message) error {
 		}
 		return err
 	}
+	s.notifySyncWaitersLocked()
 	s.debugf("Google Messages message imported channel=%s message=%s author=%s", channelID, message.ID, author)
 	return nil
 }

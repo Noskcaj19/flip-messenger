@@ -1,6 +1,7 @@
 package com.noskcaj19.flipmessenger;
 
 import android.app.Activity;
+import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.os.Bundle;
@@ -31,6 +32,7 @@ import java.util.concurrent.TimeUnit;
 
 public final class MainActivity extends Activity {
     private static final String TAG = "FlipMessenger";
+    private static volatile boolean visible;
 
     private final List<Channel> channels = new ArrayList<>();
     private final List<Message> messages = new ArrayList<>();
@@ -59,11 +61,13 @@ public final class MainActivity extends Activity {
         } catch (IllegalArgumentException error) {
             showStatus(error.getMessage());
         }
+        startForegroundService(new Intent(this, MessageConnectionService.class));
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        visible = true;
         if (api != null && (polling == null || polling.isDone())) {
             polling = network.scheduleWithFixedDelay(this::poll, 0, 2, TimeUnit.SECONDS);
         }
@@ -71,11 +75,16 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        visible = false;
         if (polling != null) {
             polling.cancel(false);
             polling = null;
         }
         super.onPause();
+    }
+
+    static boolean isVisible() {
+        return visible;
     }
 
     @Override
