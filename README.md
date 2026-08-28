@@ -56,11 +56,10 @@ permit cleartext HTTP; release builds still require HTTPS.
 Start the server from the `server` directory:
 
 ```sh
-go run ./cmd/loopback -config config.json
+go run ./cmd/flip-messenger-server -config config.json
 ```
 
-The command name is retained for compatibility, but an enabled Google Messages
-configuration does not create loopback echoes.
+When Google Messages is enabled, the server does not create loopback echoes.
 
 ## 2. Pair Google Messages
 
@@ -149,7 +148,7 @@ export ANDROID_HOME="${ANDROID_HOME:-$HOME/Android/Sdk}"
   -PapiToken=YOUR_TOKEN \
   assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
-adb shell am start -n com.example.tclflipkeytester/.MainActivity
+adb shell am start -n com.noskcaj19.flipmessenger/.MainActivity
 ```
 
 If these Gradle properties are omitted, the app intentionally points at the

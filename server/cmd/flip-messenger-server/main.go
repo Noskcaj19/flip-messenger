@@ -11,21 +11,21 @@ import (
 	"syscall"
 	"time"
 
-	loopback "flipphone/server"
+	"github.com/Noskcaj19/flip-messenger/server"
 )
 
 func main() {
 	configPath := flag.String("config", "config.json", "path to the server configuration")
 	flag.Parse()
 
-	config, err := loopback.LoadConfig(*configPath)
+	config, err := flipmessenger.LoadConfig(*configPath)
 	if err != nil {
 		log.Fatal(err)
 	}
 	if !config.AllowHTTP && (config.TLSCert == "" || config.TLSKey == "") {
 		log.Fatal("tls_cert and tls_key are required")
 	}
-	app, err := loopback.New(config)
+	app, err := flipmessenger.New(config)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -53,10 +53,10 @@ func main() {
 	}()
 
 	if config.AllowHTTP {
-		log.Printf("WARNING: loopback server using unencrypted HTTP on %s", config.Listen)
+		log.Printf("WARNING: Flip Messenger server using unencrypted HTTP on %s", config.Listen)
 		err = httpServer.ListenAndServe()
 	} else {
-		log.Printf("loopback server listening on https://%s", config.Listen)
+		log.Printf("Flip Messenger server listening on https://%s", config.Listen)
 		err = httpServer.ListenAndServeTLS(config.TLSCert, config.TLSKey)
 	}
 	if err != nil && err != http.ErrServerClosed {

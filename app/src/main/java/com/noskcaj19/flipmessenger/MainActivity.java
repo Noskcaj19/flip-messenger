@@ -1,4 +1,4 @@
-package com.example.tclflipkeytester;
+package com.noskcaj19.flipmessenger;
 
 import android.app.Activity;
 import android.graphics.Color;

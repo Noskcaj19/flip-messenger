@@ -11,11 +11,11 @@ val apiToken = providers.gradleProperty("apiToken")
     .orElse("replace-this-with-a-long-random-token")
 
 android {
-    namespace = "com.example.tclflipkeytester"
+    namespace = "com.noskcaj19.flipmessenger"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.example.tclflipkeytester"
+        applicationId = "com.noskcaj19.flipmessenger"
         minSdk = 30
         targetSdk = 36
         versionCode = 1

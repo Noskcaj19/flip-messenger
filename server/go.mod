@@ -1,4 +1,4 @@
-module flipphone/server
+module github.com/Noskcaj19/flip-messenger/server
 
 go 1.26.0
 

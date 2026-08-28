@@ -17,14 +17,12 @@
 
 - `app/` is a dependency-free native Android Java client. It uses the platform
   HTTP and JSON APIs rather than AndroidX or third-party networking libraries.
-- `server/` is a Go modular-monolith loopback server. Its module intentionally
+- `server/` is a Go modular-monolith messaging server. Its module intentionally
   remains compatible with Go 1.18 even if the local toolchain is newer.
 - `server/config.example.json` documents committed configuration.
 - `server/config.json`, `server/data/`, and `server/certs/` are ignored local
   state. Never commit their API token, state, private keys, or certificates.
-- The Android application/package ID remains
-  `com.example.tclflipkeytester` for upgrade compatibility, despite the current
-  launcher label being Flip Messenger.
+- The Android application/package ID is `com.noskcaj19.flipmessenger`.
 
 ## Current protocol invariants
 
@@ -61,7 +59,7 @@
 - Start the local server from `server/`:
 
   ```sh
-  go run ./cmd/loopback -config config.json
+  go run ./cmd/flip-messenger-server -config config.json
   ```
 
 - Build the current LAN debug APK from the repository root without printing the
@@ -79,7 +77,7 @@
 
   ```sh
   adb install -r app/build/outputs/apk/debug/app-debug.apk
-  adb shell am start -n com.example.tclflipkeytester/.MainActivity
+  adb shell am start -n com.noskcaj19.flipmessenger/.MainActivity
   ```
 
 ## Verification
@@ -87,7 +85,7 @@
 - Run server checks from `server/`:
 
   ```sh
-  gofmt -w server.go server_test.go cmd/loopback/main.go
+  gofmt -w server.go server_test.go cmd/flip-messenger-server/main.go
   go test ./...
   go vet ./...
   ```

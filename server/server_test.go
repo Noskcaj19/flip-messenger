@@ -1,4 +1,4 @@
-package loopback
+package flipmessenger
 
 import (
 	"bytes"
