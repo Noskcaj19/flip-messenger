@@ -128,7 +128,7 @@ public final class MessageConnectionService extends Service {
                 .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
                 .setContentTitle("Flip Messenger")
                 .setContentText(text)
-                .setContentIntent(openAppIntent())
+                .setContentIntent(openAppIntent(null, 0))
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
                 .setCategory(Notification.CATEGORY_SERVICE)
@@ -145,23 +145,29 @@ public final class MessageConnectionService extends Service {
         if (title == null || title.isEmpty()) {
             title = "New message";
         }
+        int notificationId = 1_000 + (message.id.hashCode() & 0x3fffffff);
         Notification notification = new Notification.Builder(this, MESSAGE_CHANNEL)
                 .setSmallIcon(android.R.drawable.stat_notify_chat)
                 .setContentTitle(title)
                 .setContentText(message.text)
                 .setStyle(new Notification.BigTextStyle().bigText(message.text))
-                .setContentIntent(openAppIntent())
+                .setContentIntent(openAppIntent(message.channelId, notificationId))
                 .setAutoCancel(true)
                 .setCategory(Notification.CATEGORY_MESSAGE)
                 .build();
-        int notificationId = 1_000 + (message.id.hashCode() & 0x3fffffff);
         getSystemService(NotificationManager.class).notify(notificationId, notification);
     }
 
-    private PendingIntent openAppIntent() {
+    private PendingIntent openAppIntent(String channelId, int requestCode) {
         Intent intent = new Intent(this, MainActivity.class)
                 .setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        if (channelId != null) {
+            intent.putExtra(MainActivity.EXTRA_CHANNEL_ID, channelId);
+        }
         return PendingIntent.getActivity(
-                this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                this,
+                requestCode,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
     }
 }

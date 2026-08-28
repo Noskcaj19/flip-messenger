@@ -32,6 +32,8 @@ import java.util.concurrent.TimeUnit;
 
 public final class MainActivity extends Activity {
     private static final String TAG = "FlipMessenger";
+    static final String EXTRA_CHANNEL_ID =
+            "com.noskcaj19.flipmessenger.extra.CHANNEL_ID";
     private static volatile boolean visible;
 
     private final List<Channel> channels = new ArrayList<>();
@@ -50,18 +52,27 @@ public final class MainActivity extends Activity {
     private EditText composer;
     private int selectedChannel;
     private Channel openChannel;
+    private String pendingChannelId;
     private volatile String cursor;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(createContentView());
+        handleIntent(getIntent());
         try {
             api = new ApiClient(BuildConfig.SERVER_URL, BuildConfig.API_TOKEN);
         } catch (IllegalArgumentException error) {
             showStatus(error.getMessage());
         }
         startForegroundService(new Intent(this, MessageConnectionService.class));
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleIntent(intent);
     }
 
     @Override
@@ -220,7 +231,11 @@ public final class MainActivity extends Activity {
         addMessages(snapshot.messages);
         cursor = snapshot.cursor;
         selectedChannel = Math.min(selectedChannel, Math.max(0, channels.size() - 1));
+        boolean openedChannel = openPendingChannel();
         render();
+        if (openedChannel) {
+            composer.requestFocus();
+        }
         showStatus("Online • cursor " + cursor);
     }
 
@@ -234,7 +249,11 @@ public final class MainActivity extends Activity {
         }
         addMessages(result.messages);
         cursor = result.cursor;
+        boolean openedChannel = openPendingChannel();
         render();
+        if (openedChannel) {
+            composer.requestFocus();
+        }
         showStatus("Online • cursor " + cursor);
     }
 
@@ -248,6 +267,29 @@ public final class MainActivity extends Activity {
             }
         }
         return null;
+    }
+
+    private void handleIntent(Intent intent) {
+        String channelId = intent.getStringExtra(EXTRA_CHANNEL_ID);
+        if (channelId == null) {
+            return;
+        }
+        pendingChannelId = channelId;
+        if (openPendingChannel()) {
+            renderConversation();
+            composer.requestFocus();
+        }
+    }
+
+    private boolean openPendingChannel() {
+        Channel channel = findChannel(pendingChannelId);
+        if (channel == null) {
+            return false;
+        }
+        openChannel = channel;
+        pendingChannelId = null;
+        selectedChannel = channels.indexOf(channel);
+        return true;
     }
 
     private void addMessages(List<Message> additions) {
